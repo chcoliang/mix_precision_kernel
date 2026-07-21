@@ -77,6 +77,8 @@ BenchResult run_variant(int variant, const char* name,
             case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
             case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
             case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 3: gemm_fp8_native_mma(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 4: gemm_cublas_fp8(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
         }
     }
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -93,6 +95,8 @@ BenchResult run_variant(int variant, const char* name,
             case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
             case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
             case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 3: gemm_fp8_native_mma(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 4: gemm_cublas_fp8(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
         }
     }
     CUDA_CHECK(cudaEventRecord(stop));
@@ -140,24 +144,16 @@ int main() {
     printf("║  Reference: FP32 GEMM -> quantize to MXFP8 -> dequantize (gold standard)          ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n");
 
-    // Real-world LLM shapes + large M scenarios
+    // Focused benchmark shapes
     struct Shape { int M; int N; int K; const char* name; };
     Shape shapes[] = {
-        // LLaMA-7B (hidden=4096, ffn=11008)
+        {4096, 4096, 4096, "Square 4K"},
         {4096, 12288, 4096, "LLaMA-7B QKV"},
         {4096, 11008, 4096, "LLaMA-7B FFN-up"},
-        {4096, 4096, 11008, "LLaMA-7B FFN-down"},
-        // LLaMA-70B (hidden=8192, ffn=28672)
         {2048, 28672, 8192, "LLaMA-70B FFN-up"},
-        {2048, 8192, 28672, "LLaMA-70B FFN-down"},
-        // Large M, small N/K
-        {65536, 2048, 2048, "M=64K, N=2K, K=2K"},
-        {131072, 2048, 2048, "M=128K, N=2K, K=2K"},
-        // Square
         {8192, 8192, 8192, "Square 8K"},
-        {16384, 16384, 16384, "Square 16K"},
     };
-    const char* variant_names[] = {"FP8 TensorCore (WMMA)", "BF16 CUDA Core", "Mixed Tiled (WMMA)"};
+    const char* variant_names[] = {"FP8 TC (WMMA)", "BF16 CUDA Core", "Mixed Tiled", "FP8 Native MMA", "cuBLAS FP8"};
 
     int num_shapes = sizeof(shapes) / sizeof(shapes[0]);
     for (int si = 0; si < num_shapes; si++) {
@@ -235,7 +231,7 @@ int main() {
         cudaFree(d_D_ref_deq);
 
         // Skip BF16 CUDA Core when compute is too large (would take > 60s)
-        for (int v = 0; v < 3; v++) {
+        for (int v = 0; v < 5; v++) {
             double flops = 2.0 * M * N * (double)K;
             if (v == 1 && flops > 2.0 * 16384.0 * 16384.0 * 16384.0) {
                 printf("│ %-19s │  (skipped - too slow)                                       │\n",
@@ -279,9 +275,9 @@ int main() {
     int v_num_blocks_k = (VK + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
     int v_num_blocks_n = (VN + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
 
-    printf("┌─────────┬──────────────────────────────────────────────────────────────────────────┐\n");
-    printf("│  std    │  FP8 TC AvgRelErr  │  FP8 TC TFLOPS  │  Mixed AvgRelErr │  Mixed TFLOPS │\n");
-    printf("├─────────┼──────────────────────────────────────────────────────────────────────────┤\n");
+    printf("┌─────────┬────────────────────────┬────────────────────────┬────────────────────────┐\n");
+    printf("│  std    │  FP8 TC  Err   TFLOPS │  Mixed   Err   TFLOPS │  cuBLAS  Err   TFLOPS │\n");
+    printf("├─────────┼────────────────────────┼────────────────────────┼────────────────────────┤\n");
 
     for (int si = 0; si < num_stds; si++) {
         float std_val = stds[si];
@@ -335,17 +331,20 @@ int main() {
         CUDA_CHECK(cudaMemcpy(ref.data(), d_ref_deq, VM * VN * sizeof(float), cudaMemcpyDeviceToHost));
         cudaFree(d_ref_fp32); cudaFree(d_ref_data); cudaFree(d_ref_scales); cudaFree(d_ref_deq);
 
-        // Run FP8 TC and Mixed Tiled
+        // Run FP8 TC, Mixed Tiled, and cuBLAS FP8
         BenchResult r0 = run_variant(0, "FP8 TC", dA, dAs, dB, dC, dCs, dD, dDs, ref.data(), VM, VN, VK);
         BenchResult r2 = run_variant(2, "Mixed", dA, dAs, dB, dC, dCs, dD, dDs, ref.data(), VM, VN, VK);
+        BenchResult r4 = run_variant(4, "cuBLAS", dA, dAs, dB, dC, dCs, dD, dDs, ref.data(), VM, VN, VK);
 
-        printf("│  %5.3f  │    %12.6f%%   │     %8.2f      │   %12.6f%%  │     %8.2f  │\n",
-               std_val, r0.avg_rel_err * 100.0f, r0.tflops, r2.avg_rel_err * 100.0f, r2.tflops);
+        printf("│  %5.3f  │  %10.6f%%  %6.1f │  %10.6f%%  %6.1f │  %10.6f%%  %6.1f │\n",
+               std_val, r0.avg_rel_err * 100.0f, r0.tflops,
+               r2.avg_rel_err * 100.0f, r2.tflops,
+               r4.avg_rel_err * 100.0f, r4.tflops);
 
         cudaFree(dA); cudaFree(dAs); cudaFree(dB);
         cudaFree(dC); cudaFree(dCs); cudaFree(dD); cudaFree(dDs);
     }
-    printf("└─────────┴──────────────────────────────────────────────────────────────────────────┘\n");
+    printf("└─────────┴────────────────────────┴────────────────────────┴────────────────────────┘\n");
 
     return 0;
 }

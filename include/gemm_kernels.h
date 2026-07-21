@@ -28,3 +28,18 @@ void gemm_mixed_tiled(const uint8_t* d_A_data, const uint8_t* d_A_scales,
                        const uint8_t* d_C_scales,
                        uint8_t* d_D_data, uint8_t* d_D_scales,
                        int M, int N, int K, cudaStream_t stream = 0);
+
+// Variant 4: Real FP8 Tensor Core using PTX mma.sync.m16n8k32.e4m3
+// A (MXFP8) kept as FP8, B (bf16) converted to FP8 per-tile, native FP8 MMA
+void gemm_fp8_native_mma(const uint8_t* d_A_data, const uint8_t* d_A_scales,
+                          const __nv_bfloat16* d_B, const uint8_t* d_C_data,
+                          const uint8_t* d_C_scales,
+                          uint8_t* d_D_data, uint8_t* d_D_scales,
+                          int M, int N, int K, cudaStream_t stream = 0);
+
+// Variant 5: cuBLAS FP8 baseline (per-tensor scaling, not block-scaled)
+void gemm_cublas_fp8(const uint8_t* d_A_data, const uint8_t* d_A_scales,
+                      const __nv_bfloat16* d_B, const uint8_t* d_C_data,
+                      const uint8_t* d_C_scales,
+                      uint8_t* d_D_data, uint8_t* d_D_scales,
+                      int M, int N, int K, cudaStream_t stream = 0);

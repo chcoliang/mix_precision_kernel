@@ -27,7 +27,10 @@ add_library(gemm_kernels STATIC
     src/kernels/gemm_fp8_tensorcore.cu
     src/kernels/gemm_bf16_cudacore.cu
     src/kernels/gemm_mixed_tiled.cu
+    src/kernels/gemm_fp8_native_mma.cu
+    src/kernels/gemm_cublas_fp8.cu
 )
+target_link_libraries(gemm_kernels mxfp8_quantize CUDA::cublas CUDA::cublasLt)
 
 # Tests
 add_executable(test_mxfp8_quantize tests/test_mxfp8_quantize.cu)

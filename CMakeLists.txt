@@ -44,3 +44,6 @@ target_link_libraries(test_gemm_perf gemm_kernels mxfp8_quantize gemm_reference 
 
 add_executable(test_benchmark_report tests/test_benchmark_report.cu)
 target_link_libraries(test_benchmark_report gemm_kernels mxfp8_quantize gemm_reference CUDA::cublas)
+
+add_executable(test_ablation tests/test_ablation.cu)
+target_link_libraries(test_ablation gemm_kernels mxfp8_quantize CUDA::cublas)

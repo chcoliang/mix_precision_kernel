@@ -124,6 +124,37 @@
 - 精度损失来源: fp16 中间精度在 K 方向累积舍入 (大 K 时增大)
 - BF16 CUDA Core 与 gold standard 完全一致, 适合精度验证场景
 
+## 测试数据生成
+
+```
+随机数生成:
+  - 种子: mt19937(42 + test_index), 确保可复现
+  - 分布: uniform(-1.0, 1.0)
+
+矩阵 A [M, K]:
+  1. 生成 FP32 随机矩阵 A_float ~ U(-1, 1)
+  2. MXFP8 量化: 沿 K 每 32 元素为一个 block
+     - scale = round_up_pow2(amax(block) / 448.0) → E8M0
+     - data[i] = round_nearest_even(A_float[i] / scale) → FP8 E4M3
+  3. 输入 kernel 的是量化后的 (A_data, A_scales)
+
+矩阵 B [K, N]:
+  1. 生成 FP32 随机值 ~ U(-1, 1)
+  2. 转换为 BF16: __float2bfloat16(val)
+  3. 直接作为 BF16 输入 kernel
+
+矩阵 C [M, N]:
+  1. 生成 FP32 随机矩阵 C_float ~ U(-1, 1)
+  2. 同 A 的方式量化为 MXFP8 (block 沿 N 方向)
+
+Gold Standard (精度参考):
+  1. A 反量化为 FP32, B 转为 FP32, C 反量化为 FP32
+  2. FP32 tiled GEMM: D_ref = A_fp32 * B_fp32 + C_fp32
+  3. D_ref 量化为 MXFP8 → 再反量化回 FP32
+  4. 与 kernel 输出 (也经过 MXFP8 反量化) 比较
+  5. 误差仅反映计算路径差异, 不含输出量化固有损失
+```
+
 ## 构建与运行
 
 ```bash

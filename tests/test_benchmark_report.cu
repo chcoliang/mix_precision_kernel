@@ -71,7 +71,8 @@ BenchResult run_variant(int variant, const char* name,
     BenchResult result;
 
     // Warmup
-    for (int i = 0; i < 5; i++) {
+    int warmup = (M >= 16384) ? 1 : (M >= 8192) ? 2 : 5;
+    for (int i = 0; i < warmup; i++) {
         switch (variant) {
             case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
             case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
@@ -85,7 +86,7 @@ BenchResult run_variant(int variant, const char* name,
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    int num_runs = (M >= 8192) ? 10 : 50;
+    int num_runs = (M >= 16384) ? 3 : (M >= 8192) ? 10 : 50;
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < num_runs; i++) {
         switch (variant) {
@@ -139,10 +140,10 @@ int main() {
     printf("║  Reference: FP32 GEMM -> quantize to MXFP8 -> dequantize (gold standard)          ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n");
 
-    int sizes[] = {512, 1024, 2048, 4096, 8192, 16384};
+    int sizes[] = {512, 1024, 2048, 4096, 8192, 16384, 32768};
     const char* variant_names[] = {"FP8 TensorCore (WMMA)", "BF16 CUDA Core", "Mixed Tiled (WMMA)"};
 
-    for (int si = 0; si < 6; si++) {
+    for (int si = 0; si < 7; si++) {
         int M = sizes[si], N = sizes[si], K = sizes[si];
         int num_blocks_k_a = (K + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
         int num_blocks_n_c = (N + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
@@ -215,10 +216,10 @@ int main() {
         cudaFree(d_ref_mxfp8_scales);
         cudaFree(d_D_ref_deq);
 
-        // For large sizes, skip BF16 CUDA Core (variant 1) as it's too slow
+        // For 32K, skip BF16 CUDA Core (would take ~40 min)
         for (int v = 0; v < 3; v++) {
-            if (v == 1 && M > 4096) {
-                printf("│ %-19s │  (skipped - too slow for large matrices)                    │\n",
+            if (v == 1 && M > 16384) {
+                printf("│ %-19s │  (skipped - too slow for 32K+)                             │\n",
                        variant_names[v]);
                 continue;
             }

@@ -136,7 +136,7 @@ BenchResult run_variant(int variant, const char* name,
 int main() {
     printf("╔══════════════════════════════════════════════════════════════════════════════════════╗\n");
     printf("║        Mixed Precision GEMM Benchmark (H100, SM90)                                 ║\n");
-    printf("║  Reference: bf16 dequant -> bf16 matmul -> FP32 accumulate                         ║\n");
+    printf("║  Reference: FP32 GEMM -> quantize to MXFP8 -> dequantize (gold standard)          ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n");
 
     int sizes[] = {512, 1024, 2048, 4096};
@@ -192,13 +192,28 @@ int main() {
         CUDA_CHECK(cudaMemcpy(d_C_data, C_data.data(), M * N, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_C_scales, C_scales.data(), M * num_blocks_n_c, cudaMemcpyHostToDevice));
 
-        // Compute bf16 reference on GPU
-        float* d_D_ref;
-        CUDA_CHECK(cudaMalloc(&d_D_ref, M * N * sizeof(float)));
-        compute_bf16_reference_gpu(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_ref, M, N, K);
+        // Reference: FP32 full-precision GEMM → quantize to MXFP8 → dequantize as gold standard
+        float* d_D_ref_fp32;
+        CUDA_CHECK(cudaMalloc(&d_D_ref_fp32, M * N * sizeof(float)));
+        compute_bf16_reference_gpu(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_ref_fp32, M, N, K);
+
+        // Quantize FP32 result to MXFP8, then dequantize → this is the gold standard
+        uint8_t *d_ref_mxfp8_data, *d_ref_mxfp8_scales;
+        CUDA_CHECK(cudaMalloc(&d_ref_mxfp8_data, M * N));
+        CUDA_CHECK(cudaMalloc(&d_ref_mxfp8_scales, M * num_blocks_n_d));
+        mxfp8_quantize_gpu(d_D_ref_fp32, d_ref_mxfp8_data, d_ref_mxfp8_scales, M, N);
+
+        float* d_D_ref_deq;
+        CUDA_CHECK(cudaMalloc(&d_D_ref_deq, M * N * sizeof(float)));
+        mxfp8_dequantize_gpu(d_ref_mxfp8_data, d_ref_mxfp8_scales, d_D_ref_deq, M, N);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
         std::vector<float> D_ref(M * N);
-        CUDA_CHECK(cudaMemcpy(D_ref.data(), d_D_ref, M * N * sizeof(float), cudaMemcpyDeviceToHost));
-        cudaFree(d_D_ref);
+        CUDA_CHECK(cudaMemcpy(D_ref.data(), d_D_ref_deq, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+        cudaFree(d_D_ref_fp32);
+        cudaFree(d_ref_mxfp8_data);
+        cudaFree(d_ref_mxfp8_scales);
+        cudaFree(d_D_ref_deq);
 
         for (int v = 0; v < 3; v++) {
             BenchResult r = run_variant(v, variant_names[v],
@@ -221,10 +236,11 @@ int main() {
     }
 
     printf("Notes:\n");
-    printf("  - Reference: A dequantized to bf16, B in bf16, FP32 accumulation\n");
-    printf("  - MaxRelErr/AvgRelErr: relative to bf16 reference result\n");
-    printf("  - RMSE: root mean square error of absolute differences\n");
-    printf("  - Timing: average of 50 runs after 5 warmup iterations\n");
+    printf("  - Reference: FP32 full-precision GEMM -> quantize to MXFP8 -> dequantize\n");
+    printf("  - MaxRelErr/AvgRelErr: kernel MXFP8 output vs ideal FP32->MXFP8 output\n");
+    printf("  - Error measures computation precision loss (not output quantization loss)\n");
+    printf("  - Timing includes output MXFP8 quantization overhead\n");
+    printf("  - Average of 50 runs after 5 warmup iterations\n");
 
     return 0;
 }

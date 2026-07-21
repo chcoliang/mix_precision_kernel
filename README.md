@@ -12,11 +12,11 @@
 
 ## 三种 Kernel 实现方案
 
-| 方案 | 策略 | Tensor Core | 精度保留 |
-|------|------|-------------|----------|
-| **FP8 TensorCore** | A 反量化为 half，B 转 half，WMMA fp16 MMA | ✅ FP16 WMMA | A/B 均经过 fp16 转换 |
+| 方案 | 策略 | Tensor Core | 特点 |
+|------|------|-------------|------|
+| **FP8 TensorCore** | 8-warp, 128×128 block tile, 双缓冲 K-loop, 每 warp 4×2 WMMA | ✅ FP16 WMMA | 最高吞吐，大矩阵最优 |
 | **BF16 CUDA Core** | A 反量化为 float，B 转 float，FMA 累加 | ❌ 纯 CUDA Core | 最高精度，B 完全保留 |
-| **Mixed Tiled** | 多 warp 分块，A 反量化为 half，B 转 half，WMMA | ✅ FP16 WMMA (4-warp) | 同 FP8 TensorCore |
+| **Mixed Tiled** | 4-warp 分块，A 反量化为 half，B 转 half，WMMA | ✅ FP16 WMMA (4-warp) | 均衡方案 |
 
 ## Benchmark 结果 (H100 80GB HBM3)
 
@@ -26,7 +26,7 @@
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 0.082 | 3.26 | 0.000945 | 0.000000 | 9.09e-07 |
+| FP8 TensorCore (WMMA) | 0.104 | 2.57 | 0.000945 | 0.000000 | 9.09e-07 |
 | BF16 CUDA Core | 0.311 | 0.86 | 0.000000 | 0.000000 | 0.00e+00 |
 | Mixed Tiled (WMMA) | 0.057 | 4.71 | 0.000945 | 0.000000 | 9.09e-07 |
 
@@ -34,32 +34,33 @@
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 0.515 | 4.17 | 0.017094 | 0.000001 | 2.37e-06 |
-| BF16 CUDA Core | 1.425 | 1.51 | 0.000000 | 0.000000 | 0.00e+00 |
-| Mixed Tiled (WMMA) | 0.316 | 6.80 | 0.017094 | 0.000001 | 2.37e-06 |
+| FP8 TensorCore (WMMA) | 0.229 | 9.39 | 0.017094 | 0.000001 | 2.37e-06 |
+| BF16 CUDA Core | 1.431 | 1.50 | 0.000000 | 0.000000 | 0.00e+00 |
+| Mixed Tiled (WMMA) | 0.319 | 6.74 | 0.017094 | 0.000001 | 2.37e-06 |
 
 ### 2048 x 2048 x 2048
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 3.394 | 5.06 | 0.953674 | 0.000002 | 6.92e-06 |
-| BF16 CUDA Core | 9.772 | 1.76 | 0.000000 | 0.000000 | 0.00e+00 |
-| Mixed Tiled (WMMA) | 2.218 | 7.75 | 0.953674 | 0.000002 | 6.92e-06 |
+| FP8 TensorCore (WMMA) | 1.430 | 12.02 | 0.953674 | 0.000002 | 6.92e-06 |
+| BF16 CUDA Core | 9.848 | 1.74 | 0.000000 | 0.000000 | 0.00e+00 |
+| Mixed Tiled (WMMA) | 2.217 | 7.75 | 0.953674 | 0.000002 | 6.92e-06 |
 
 ### 4096 x 4096 x 4096
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 27.089 | 5.07 | 2.384186 | 0.000004 | 2.25e-05 |
-| BF16 CUDA Core | 74.593 | 1.84 | 0.000000 | 0.000000 | 0.00e+00 |
-| Mixed Tiled (WMMA) | 17.169 | 8.01 | 2.384186 | 0.000004 | 2.25e-05 |
+| FP8 TensorCore (WMMA) | 9.380 | **14.65** | 2.384186 | 0.000004 | 2.25e-05 |
+| BF16 CUDA Core | 74.601 | 1.84 | 0.000000 | 0.000000 | 0.00e+00 |
+| Mixed Tiled (WMMA) | 17.111 | 8.03 | 2.384186 | 0.000004 | 2.25e-05 |
 
 ### 结果分析
 
-1. **性能排序**: Mixed Tiled (8 TFLOPS) > FP8 TensorCore (5 TFLOPS) > BF16 CUDA Core (1.8 TFLOPS)
+1. **性能排序 (大矩阵)**: FP8 TensorCore (14.65 TFLOPS) > Mixed Tiled (8.03 TFLOPS) > BF16 CUDA Core (1.84 TFLOPS)
 2. **精度排序**: BF16 CUDA Core (完全精确) > WMMA 变体 (fp16 转换引入少量舍入误差)
 3. **MaxRelErr 说明**: WMMA 变体的大 MaxRelErr 仅出现在个别极小值元素处（除法放大），平均相对误差 (AvgRelErr) 极小 (< 0.0004%)
-4. **Mixed Tiled 最优**: 利用 4-warp 并行和共享内存分块，WMMA 利用率高，比单 warp 版本快 ~60%
+4. **FP8 TensorCore 优化要点**: 128×128 block tile + 8-warp 并行 + 双缓冲 K-loop + 每 warp 4×2 WMMA fragments，大矩阵时 SM 利用率极高
+5. **小矩阵注意**: 512 规模时 FP8 TensorCore 因 block tile (128×128) 过大导致 grid 只有 4×4=16 blocks，无法填满所有 SM；Mixed Tiled (32×32 block tile) 在小矩阵更优
 
 ## MXFP8 格式说明
 
@@ -91,7 +92,7 @@ mix_precision_kernel/
 │   └── mxfp8_utils.h                  # MXFP8 量化/反量化接口
 ├── src/
 │   ├── kernels/
-│   │   ├── gemm_fp8_tensorcore.cu      # 方案1: FP16 WMMA TensorCore
+│   │   ├── gemm_fp8_tensorcore.cu      # 方案1: 8-warp 128×128 双缓冲 WMMA
 │   │   ├── gemm_bf16_cudacore.cu       # 方案2: CUDA Core FP32 累加
 │   │   └── gemm_mixed_tiled.cu         # 方案3: 4-warp 分块 WMMA
 │   ├── quantize/

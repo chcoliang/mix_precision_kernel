@@ -38,3 +38,6 @@ target_link_libraries(test_gemm_correctness gemm_kernels mxfp8_quantize gemm_ref
 
 add_executable(test_gemm_perf tests/test_gemm_perf.cu)
 target_link_libraries(test_gemm_perf gemm_kernels mxfp8_quantize gemm_reference CUDA::cublas)
+
+add_executable(test_benchmark_report tests/test_benchmark_report.cu)
+target_link_libraries(test_benchmark_report gemm_kernels mxfp8_quantize gemm_reference CUDA::cublas)

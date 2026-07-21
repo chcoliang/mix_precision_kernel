@@ -265,7 +265,87 @@ int main() {
     printf("  - MaxRelErr/AvgRelErr: kernel MXFP8 output vs ideal FP32->MXFP8 output\n");
     printf("  - Error measures computation precision loss (not output quantization loss)\n");
     printf("  - Timing includes output MXFP8 quantization overhead\n");
-    printf("  - Average of 50 runs after 5 warmup iterations\n");
+    printf("  - Data distribution: Gaussian(0, std)\n");
+
+    // === Variance sweep: test different std on fixed shape ===
+    printf("\n\n");
+    printf("╔══════════════════════════════════════════════════════════════════════════════════════╗\n");
+    printf("║  Variance Sweep: Gaussian(0, std) on shape [4096 x 4096 x 4096]                   ║\n");
+    printf("╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n");
+
+    float stds[] = {0.01f, 0.02f, 0.05f, 0.1f, 0.5f, 1.0f, 5.0f};
+    int num_stds = sizeof(stds) / sizeof(stds[0]);
+    int VM = 4096, VN = 4096, VK = 4096;
+    int v_num_blocks_k = (VK + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
+    int v_num_blocks_n = (VN + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
+
+    printf("┌─────────┬──────────────────────────────────────────────────────────────────────────┐\n");
+    printf("│  std    │  FP8 TC AvgRelErr  │  FP8 TC TFLOPS  │  Mixed AvgRelErr │  Mixed TFLOPS │\n");
+    printf("├─────────┼──────────────────────────────────────────────────────────────────────────┤\n");
+
+    for (int si = 0; si < num_stds; si++) {
+        float std_val = stds[si];
+        std::mt19937 rng(123 + si);
+        std::normal_distribution<float> vdist(0.0f, std_val);
+
+        std::vector<float> vA(VM * VK), vC(VM * VN);
+        for (auto& v : vA) v = vdist(rng);
+        for (auto& v : vC) v = vdist(rng);
+
+        std::vector<uint8_t> vA_data(VM * VK), vA_scales(VM * v_num_blocks_k);
+        std::vector<uint8_t> vC_data(VM * VN), vC_scales(VM * v_num_blocks_n);
+        mxfp8_quantize_host(vA.data(), vA_data.data(), vA_scales.data(), VM, VK);
+        mxfp8_quantize_host(vC.data(), vC_data.data(), vC_scales.data(), VM, VN);
+
+        std::vector<__nv_bfloat16> vB(VK * VN);
+        for (int i = 0; i < VK * VN; i++) vB[i] = __float2bfloat16(vdist(rng));
+
+        uint8_t *dA, *dAs, *dC, *dCs, *dD, *dDs;
+        __nv_bfloat16* dB;
+        CUDA_CHECK(cudaMalloc(&dA, VM * VK));
+        CUDA_CHECK(cudaMalloc(&dAs, VM * v_num_blocks_k));
+        CUDA_CHECK(cudaMalloc(&dB, VK * VN * sizeof(__nv_bfloat16)));
+        CUDA_CHECK(cudaMalloc(&dC, VM * VN));
+        CUDA_CHECK(cudaMalloc(&dCs, VM * v_num_blocks_n));
+        CUDA_CHECK(cudaMalloc(&dD, VM * VN));
+        CUDA_CHECK(cudaMalloc(&dDs, VM * v_num_blocks_n));
+
+        CUDA_CHECK(cudaMemcpy(dA, vA_data.data(), VM * VK, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dAs, vA_scales.data(), VM * v_num_blocks_k, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dB, vB.data(), VK * VN * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dC, vC_data.data(), VM * VN, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(dCs, vC_scales.data(), VM * v_num_blocks_n, cudaMemcpyHostToDevice));
+
+        // Compute reference
+        float* d_ref_fp32;
+        CUDA_CHECK(cudaMalloc(&d_ref_fp32, VM * VN * sizeof(float)));
+        compute_bf16_reference_gpu(dA, dAs, dB, dC, dCs, d_ref_fp32, VM, VN, VK);
+
+        uint8_t *d_ref_data, *d_ref_scales;
+        CUDA_CHECK(cudaMalloc(&d_ref_data, VM * VN));
+        CUDA_CHECK(cudaMalloc(&d_ref_scales, VM * v_num_blocks_n));
+        mxfp8_quantize_gpu(d_ref_fp32, d_ref_data, d_ref_scales, VM, VN);
+
+        float* d_ref_deq;
+        CUDA_CHECK(cudaMalloc(&d_ref_deq, VM * VN * sizeof(float)));
+        mxfp8_dequantize_gpu(d_ref_data, d_ref_scales, d_ref_deq, VM, VN);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<float> ref(VM * VN);
+        CUDA_CHECK(cudaMemcpy(ref.data(), d_ref_deq, VM * VN * sizeof(float), cudaMemcpyDeviceToHost));
+        cudaFree(d_ref_fp32); cudaFree(d_ref_data); cudaFree(d_ref_scales); cudaFree(d_ref_deq);
+
+        // Run FP8 TC and Mixed Tiled
+        BenchResult r0 = run_variant(0, "FP8 TC", dA, dAs, dB, dC, dCs, dD, dDs, ref.data(), VM, VN, VK);
+        BenchResult r2 = run_variant(2, "Mixed", dA, dAs, dB, dC, dCs, dD, dDs, ref.data(), VM, VN, VK);
+
+        printf("│  %5.3f  │    %12.6f%%   │     %8.2f      │   %12.6f%%  │     %8.2f  │\n",
+               std_val, r0.avg_rel_err * 100.0f, r0.tflops, r2.avg_rel_err * 100.0f, r2.tflops);
+
+        cudaFree(dA); cudaFree(dAs); cudaFree(dB);
+        cudaFree(dC); cudaFree(dCs); cudaFree(dD); cudaFree(dDs);
+    }
+    printf("└─────────┴──────────────────────────────────────────────────────────────────────────┘\n");
 
     return 0;
 }

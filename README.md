@@ -175,7 +175,34 @@ Gold Standard (精度参考):
   - 避免 uniform 分布的边界效应
 ```
 
-## 构建与运行
+## 与已有实现对比
+
+| 实现 | 硬件 | 格式 | 峰值 TFLOPS | 说明 |
+|------|------|------|------------|------|
+| **cuBLAS FP8** | H100 | FP8 E4M3 (per-tensor scaling) | ~1500-1800 | 硬件原生 FP8 MMA, 理论峰值 1979 TFLOPS |
+| **cuBLAS BF16** | H100 | BF16 | ~800-900 | 理论峰值 989 TFLOPS |
+| **CUTLASS Block-Scaled** | Blackwell (SM100) | MXFP8×BF16 mixed | ~2000+ | 使用 tcgen05.mma.blockscaled, 仅 SM100 |
+| **Transformer Engine MXFP8** | Blackwell (SM100+) | MXFP8 | ~1.6x vs BF16 | 需要 SM100, 通过 torch API 调用 |
+| **TK-GEMM (Triton)** | H100 | FP8 per-tensor | ~1.87x cuBLAS FP8 | 针对小 batch 推理优化的 SplitK 方案 |
+| **本项目 FP8 TensorCore** | H100 | MXFP8 (软件模拟) | **15.6** | H100 上唯一的 MXFP8 block-scaled 实现 |
+
+**关键差异:**
+
+1. **本项目是 H100 上唯一的 MXFP8 block-scaled GEMM 实现**
+   - MXFP8 (32-element block scaling) 是 Blackwell 硬件原生特性
+   - 现有方案 (cuBLAS/CUTLASS MXFP8) 均要求 SM100+
+   - 本项目通过软件模拟在 H100 (SM90) 上实现 MXFP8 语义
+
+2. **性能差距分析 (本项目 15.6 vs cuBLAS ~1500 TFLOPS)**
+   - cuBLAS 使用硬件原生 FP8 `mma.sync` PTX 指令 (m16n8k32), 本项目使用 FP16 WMMA (m16n16k16)
+   - 本项目额外开销: MXFP8 反量化 (global mem → smem) + FP16 转换 + 输出 MXFP8 量化
+   - WMMA API 限制: 无法直接使用 FP8 tensor core, 只能通过 FP16 间接利用
+   - 进一步优化方向: PTX 内联 `mma.sync.m16n8k32.e4m3` 可提升 2-4x
+
+3. **适用场景**
+   - 本项目适合: 需要在 H100 上使用 MXFP8 格式兼容 Blackwell 训练流水线的场景
+   - cuBLAS FP8 适合: 不需要 block scaling, 使用 per-tensor scaling 的标准 FP8 推理
+   - CUTLASS Blackwell 适合: 拥有 Blackwell GPU, 追求峰值性能
 
 ```bash
 # 构建

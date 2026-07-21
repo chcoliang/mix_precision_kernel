@@ -20,47 +20,56 @@
 
 ## Benchmark 结果 (H100 80GB HBM3)
 
-精度标准：**纯 BF16 计算路径**（A 反量化到 float → B float → FP32 累加）作为 ground truth。
+**输入**: A [M,K] MXFP8, B [K,N] BF16, C [M,N] MXFP8  
+**输出**: D [M,N] MXFP8 (含输出量化开销)  
+**精度标准**: 纯 BF16 计算路径（A 反量化→FP32 matmul→FP32 累加，不做输出量化）作为 ground truth
 
 ### 512 x 512 x 512
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 0.104 | 2.57 | 0.000945 | 0.000000 | 9.09e-07 |
-| BF16 CUDA Core | 0.311 | 0.86 | 0.000000 | 0.000000 | 0.00e+00 |
-| Mixed Tiled (WMMA) | 0.057 | 4.71 | 0.000945 | 0.000000 | 9.09e-07 |
+| FP8 TensorCore (WMMA) | 0.278 | 0.97 | 1.000000 | 0.022569 | 2.01e-01 |
+| BF16 CUDA Core | 0.484 | 0.55 | 1.000000 | 0.022569 | 2.01e-01 |
+| Mixed Tiled (WMMA) | 0.231 | 1.16 | 1.000000 | 0.022569 | 2.01e-01 |
 
 ### 1024 x 1024 x 1024
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 0.229 | 9.39 | 0.017094 | 0.000001 | 2.37e-06 |
-| BF16 CUDA Core | 1.431 | 1.50 | 0.000000 | 0.000000 | 0.00e+00 |
-| Mixed Tiled (WMMA) | 0.319 | 6.74 | 0.017094 | 0.000001 | 2.37e-06 |
+| FP8 TensorCore (WMMA) | 0.438 | 4.90 | 1.000000 | 0.022533 | 2.83e-01 |
+| BF16 CUDA Core | 1.638 | 1.31 | 1.000000 | 0.022533 | 2.83e-01 |
+| Mixed Tiled (WMMA) | 0.536 | 4.01 | 1.000000 | 0.022533 | 2.83e-01 |
 
 ### 2048 x 2048 x 2048
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 1.430 | 12.02 | 0.953674 | 0.000002 | 6.92e-06 |
-| BF16 CUDA Core | 9.848 | 1.74 | 0.000000 | 0.000000 | 0.00e+00 |
-| Mixed Tiled (WMMA) | 2.217 | 7.75 | 0.953674 | 0.000002 | 6.92e-06 |
+| FP8 TensorCore (WMMA) | 2.595 | 6.62 | 1.048000 | 0.022501 | 4.00e-01 |
+| BF16 CUDA Core | 10.204 | 1.68 | 1.000000 | 0.022501 | 4.00e-01 |
+| Mixed Tiled (WMMA) | 2.568 | 6.69 | 1.048000 | 0.022501 | 4.00e-01 |
 
 ### 4096 x 4096 x 4096
 
 | Variant | Time(ms) | TFLOPS | MaxRelErr | AvgRelErr | RMSE |
 |---------|----------|--------|-----------|-----------|------|
-| FP8 TensorCore (WMMA) | 9.380 | **14.65** | 2.384186 | 0.000004 | 2.25e-05 |
-| BF16 CUDA Core | 74.601 | 1.84 | 0.000000 | 0.000000 | 0.00e+00 |
-| Mixed Tiled (WMMA) | 17.111 | 8.03 | 2.384186 | 0.000004 | 2.25e-05 |
+| FP8 TensorCore (WMMA) | 10.306 | **13.34** | 1.197425 | 0.022175 | 5.56e-01 |
+| BF16 CUDA Core | 75.693 | 1.82 | 1.000000 | 0.022175 | 5.56e-01 |
+| Mixed Tiled (WMMA) | 18.203 | 7.55 | 1.197425 | 0.022175 | 5.56e-01 |
 
 ### 结果分析
 
-1. **性能排序 (大矩阵)**: FP8 TensorCore (14.65 TFLOPS) > Mixed Tiled (8.03 TFLOPS) > BF16 CUDA Core (1.84 TFLOPS)
-2. **精度排序**: BF16 CUDA Core (完全精确) > WMMA 变体 (fp16 转换引入少量舍入误差)
-3. **MaxRelErr 说明**: WMMA 变体的大 MaxRelErr 仅出现在个别极小值元素处（除法放大），平均相对误差 (AvgRelErr) 极小 (< 0.0004%)
-4. **FP8 TensorCore 优化要点**: 128×128 block tile + 8-warp 并行 + 双缓冲 K-loop + 每 warp 4×2 WMMA fragments，大矩阵时 SM 利用率极高
-5. **小矩阵注意**: 512 规模时 FP8 TensorCore 因 block tile (128×128) 过大导致 grid 只有 4×4=16 blocks，无法填满所有 SM；Mixed Tiled (32×32 block tile) 在小矩阵更优
+**性能:**
+1. **FP8 TensorCore** 在大矩阵(4K)达到 **13.34 TFLOPS**，是最快方案
+2. **Mixed Tiled** 达到 7.55 TFLOPS，在中小矩阵(512~2K)与 FP8 TensorCore 接近
+3. **BF16 CUDA Core** 约 1.8 TFLOPS，不使用 tensor core 故最慢
+
+**精度:**
+1. **三种方案精度完全一致** (AvgRelErr ≈ 2.25%)，误差来源是 MXFP8 输出量化本身的固有精度损失
+2. **MaxRelErr ≈ 1.0** 出现在 FP32 结果接近零的元素处：量化后为零，relative error = 1.0
+3. **AvgRelErr ≈ 2.25%** 是 FP8 E4M3 (3-bit mantissa) 的理论量化误差水平
+4. WMMA 变体在 2K/4K 有轻微额外 MaxRelErr (1.05~1.20) 来自 fp16 中间精度舍入
+
+**结论: 精度由输出 MXFP8 格式决定（而非计算路径），选择 FP8 TensorCore 可获得最佳性能且不牺牲精度。**
 
 ## MXFP8 格式说明
 

@@ -140,16 +140,38 @@ int main() {
     printf("║  Reference: FP32 GEMM -> quantize to MXFP8 -> dequantize (gold standard)          ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n");
 
-    int sizes[] = {512, 1024, 2048, 4096, 8192, 16384, 32768};
+    // Real-world LLM shapes: (M, N, K)
+    struct Shape { int M; int N; int K; const char* name; };
+    Shape shapes[] = {
+        // LLaMA-7B typical shapes (hidden=4096, ffn=11008)
+        {4096, 12288, 4096, "LLaMA-7B QKV (seq=4K)"},
+        {4096, 4096, 4096, "LLaMA-7B O-proj (seq=4K)"},
+        {4096, 11008, 4096, "LLaMA-7B FFN-up (seq=4K)"},
+        {4096, 4096, 11008, "LLaMA-7B FFN-down (seq=4K)"},
+        // LLaMA-70B typical shapes (hidden=8192, ffn=28672)
+        {2048, 8192, 8192, "LLaMA-70B QKV (seq=2K)"},
+        {2048, 28672, 8192, "LLaMA-70B FFN-up (seq=2K)"},
+        {2048, 8192, 28672, "LLaMA-70B FFN-down (seq=2K)"},
+        // Large batch inference
+        {32768, 4096, 4096, "Batch infer (bs=32K,h=4K)"},
+        {32768, 11008, 4096, "Batch FFN-up (bs=32K)"},
+        {32768, 4096, 11008, "Batch FFN-down (bs=32K)"},
+        // Square reference points
+        {8192, 8192, 8192, "Square 8K"},
+        {16384, 16384, 16384, "Square 16K"},
+        {32768, 32768, 32768, "Square 32K"},
+    };
     const char* variant_names[] = {"FP8 TensorCore (WMMA)", "BF16 CUDA Core", "Mixed Tiled (WMMA)"};
 
-    for (int si = 0; si < 7; si++) {
-        int M = sizes[si], N = sizes[si], K = sizes[si];
+    int num_shapes = sizeof(shapes) / sizeof(shapes[0]);
+    for (int si = 0; si < num_shapes; si++) {
+        int M = shapes[si].M, N = shapes[si].N, K = shapes[si].K;
+        const char* shape_name = shapes[si].name;
         int num_blocks_k_a = (K + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
         int num_blocks_n_c = (N + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
 
-        printf("┌─────────────────────────────────────────────────────────────────────────────────────┐\n");
-        printf("│ Matrix Size: %d x %d x %d                                                       │\n", M, N, K);
+        printf("┌──────────────────────────────────────────────────────────────────────────────────────────┐\n");
+        printf("│ %-40s [M=%d, N=%d, K=%d]\n", shape_name, M, N, K);
         printf("├─────────────────────┬───────────┬──────────┬───────────┬───────────┬───────────────┤\n");
         printf("│ Variant             │ Time(ms)  │ TFLOPS   │ MaxRelErr │ AvgRelErr │ RMSE          │\n");
         printf("├─────────────────────┼───────────┼──────────┼───────────┼───────────┼───────────────┤\n");
@@ -216,10 +238,11 @@ int main() {
         cudaFree(d_ref_mxfp8_scales);
         cudaFree(d_D_ref_deq);
 
-        // For 32K, skip BF16 CUDA Core (would take ~40 min)
+        // Skip BF16 CUDA Core when compute is too large (would take > 60s)
         for (int v = 0; v < 3; v++) {
-            if (v == 1 && M > 16384) {
-                printf("│ %-19s │  (skipped - too slow for 32K+)                             │\n",
+            double flops = 2.0 * M * N * (double)K;
+            if (v == 1 && flops > 2.0 * 16384.0 * 16384.0 * 16384.0) {
+                printf("│ %-19s │  (skipped - too slow)                                       │\n",
                        variant_names[v]);
                 continue;
             }
@@ -232,7 +255,6 @@ int main() {
         }
 
         printf("└─────────────────────┴───────────┴──────────┴───────────┴───────────┴───────────────┘\n\n");
-
         cudaFree(d_A_data);
         cudaFree(d_A_scales);
         cudaFree(d_B);

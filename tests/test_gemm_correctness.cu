@@ -21,9 +21,9 @@ void run_correctness_test(const TestCase& tc, float tolerance) {
     int num_blocks_n_c = (N + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
 
     std::mt19937 rng(42);
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::normal_distribution<float> dist(0.0f, 0.02f);
 
-    // Generate random data
+    // Generate random data (Gaussian, std=0.02)
     std::vector<float> A_float(M * K), B_float(K * N), C_float(M * N);
     for (auto& v : A_float) v = dist(rng);
     for (auto& v : B_float) v = dist(rng);

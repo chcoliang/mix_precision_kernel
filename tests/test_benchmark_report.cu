@@ -140,17 +140,22 @@ int main() {
     printf("║  Reference: FP32 GEMM -> quantize to MXFP8 -> dequantize (gold standard)          ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n");
 
-    // Large M, small N/K shapes (long sequence / large batch with small hidden)
+    // Real-world LLM shapes + large M scenarios
     struct Shape { int M; int N; int K; const char* name; };
     Shape shapes[] = {
-        {65536, 1024, 1024, "M=64K, N=1K, K=1K"},
-        {65536, 2048, 1024, "M=64K, N=2K, K=1K"},
-        {65536, 1024, 2048, "M=64K, N=1K, K=2K"},
+        // LLaMA-7B (hidden=4096, ffn=11008)
+        {4096, 12288, 4096, "LLaMA-7B QKV"},
+        {4096, 11008, 4096, "LLaMA-7B FFN-up"},
+        {4096, 4096, 11008, "LLaMA-7B FFN-down"},
+        // LLaMA-70B (hidden=8192, ffn=28672)
+        {2048, 28672, 8192, "LLaMA-70B FFN-up"},
+        {2048, 8192, 28672, "LLaMA-70B FFN-down"},
+        // Large M, small N/K
         {65536, 2048, 2048, "M=64K, N=2K, K=2K"},
-        {131072, 1024, 1024, "M=128K, N=1K, K=1K"},
-        {131072, 2048, 1024, "M=128K, N=2K, K=1K"},
-        {131072, 1024, 2048, "M=128K, N=1K, K=2K"},
         {131072, 2048, 2048, "M=128K, N=2K, K=2K"},
+        // Square
+        {8192, 8192, 8192, "Square 8K"},
+        {16384, 16384, 16384, "Square 16K"},
     };
     const char* variant_names[] = {"FP8 TensorCore (WMMA)", "BF16 CUDA Core", "Mixed Tiled (WMMA)"};
 
@@ -167,9 +172,9 @@ int main() {
         printf("│ Variant             │ Time(ms)  │ TFLOPS   │ MaxRelErr │ AvgRelErr │ RMSE          │\n");
         printf("├─────────────────────┼───────────┼──────────┼───────────┼───────────┼───────────────┤\n");
 
-        // Generate data
+        // Generate data with Gaussian distribution (mean=0, std=0.02)
         std::mt19937 rng(42 + si);
-        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+        std::normal_distribution<float> dist(0.0f, 0.02f);
 
         std::vector<float> A_float(M * K), C_float(M * N);
         for (auto& v : A_float) v = dist(rng);

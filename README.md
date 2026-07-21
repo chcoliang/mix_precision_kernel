@@ -8,7 +8,7 @@
 - **A** (输入激活): MXFP8 格式 (FP8 E4M3 数据 + E8M0 block scaling, 每32个元素一个 scale)
 - **B** (权重): BF16 格式
 - **C** (偏置): MXFP8 格式
-- **D** (输出): FP32 格式
+- **D** (输出): MXFP8 格式 (FP8 E4M3 数据 + E8M0 block scaling, 每32个元素一个 scale)
 
 ## 三种 Kernel 实现方案
 
@@ -96,21 +96,32 @@
 
 **结论: FP8 TensorCore 在所有 LLM 典型 shape 中均为最优选择——14+ TFLOPS 性能，< 0.02% 精度损失（大多数场景）。**
 
-## MXFP8 格式说明
+## MXFP8 格式说明 (OCP Microscaling Spec)
 
 ```
-MXFP8 = FP8 E4M3 数据 + E8M0 Block Scaling
+MXFP8 = FP8 E4M3 数据 + E8M0 Block Scaling (OCP Microscaling Standard)
 
-Block Size: 32 elements (沿 K 维度)
-Scale Format: E8M0 (纯指数字节, value = 2^(byte - 127))
+Block Size: 32 elements (一维, 沿连续维度)
+  - 输入 A [M,K]: block 沿 K 方向, scales shape = [M, ceil(K/32)]
+  - 输出 D [M,N]: block 沿 N 方向, scales shape = [M, ceil(N/32)]
 
-量化流程:
-  1. 计算 block 内 amax = max(|vals[0:31]|)
+Data Format: FP8 E4M3 (1-sign, 4-exponent, 3-mantissa, max=448.0)
+Scale Format: E8M0 (8-bit exponent only, bias=127, value = 2^(byte-127))
+  - 范围: 2^-127 ~ 2^128, 仅为 2 的幂次
+
+量化流程 (per block of 32 elements):
+  1. amax = max(|vals[0:31]|)
   2. scale = round_up_to_power_of_2(amax / 448.0)  → 存为 E8M0
   3. output[i] = round_to_nearest_even(vals[i] / scale) → 存为 FP8 E4M3
 
 反量化:
   output[i] = fp8_to_float(data[i]) * e8m0_to_float(scale)
+
+约束:
+  - 张量最后一维必须是 32 的倍数 (不足补零)
+  - Block 为一维 (不做 2D scaling)
+  - 硬件原生支持: NVIDIA Blackwell (SM100+)
+  - 本项目在 H100 (SM90) 上通过软件实现
 ```
 
 ## 项目结构

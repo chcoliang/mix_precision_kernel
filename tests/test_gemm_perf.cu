@@ -14,7 +14,8 @@ struct BenchCase {
 void benchmark_variant(const char* name, int variant,
                        uint8_t* d_A_data, uint8_t* d_A_scales,
                        __nv_bfloat16* d_B, uint8_t* d_C_data,
-                       uint8_t* d_C_scales, float* d_D,
+                       uint8_t* d_C_scales,
+                       uint8_t* d_D_data, uint8_t* d_D_scales,
                        int M, int N, int K) {
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
@@ -23,9 +24,9 @@ void benchmark_variant(const char* name, int variant,
     // Warmup
     for (int i = 0; i < 10; i++) {
         switch (variant) {
-            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
+            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
         }
     }
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -35,9 +36,9 @@ void benchmark_variant(const char* name, int variant,
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < num_runs; i++) {
         switch (variant) {
-            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
+            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
         }
     }
     CUDA_CHECK(cudaEventRecord(stop));
@@ -60,6 +61,7 @@ void run_benchmark(const BenchCase& bc) {
 
     int num_blocks_k_a = (K + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
     int num_blocks_n_c = (N + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
+    int num_blocks_n_d = (N + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
 
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -79,15 +81,16 @@ void run_benchmark(const BenchCase& bc) {
 
     // Device allocation
     uint8_t *d_A_data, *d_A_scales, *d_C_data, *d_C_scales;
+    uint8_t *d_D_data, *d_D_scales;
     __nv_bfloat16* d_B;
-    float* d_D;
 
     CUDA_CHECK(cudaMalloc(&d_A_data, M * K));
     CUDA_CHECK(cudaMalloc(&d_A_scales, M * num_blocks_k_a));
     CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(__nv_bfloat16)));
     CUDA_CHECK(cudaMalloc(&d_C_data, M * N));
     CUDA_CHECK(cudaMalloc(&d_C_scales, M * num_blocks_n_c));
-    CUDA_CHECK(cudaMalloc(&d_D, M * N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_D_data, M * N));
+    CUDA_CHECK(cudaMalloc(&d_D_scales, M * num_blocks_n_d));
 
     CUDA_CHECK(cudaMemcpy(d_A_data, A_data.data(), M * K, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_A_scales, A_scales.data(), M * num_blocks_k_a, cudaMemcpyHostToDevice));
@@ -95,16 +98,17 @@ void run_benchmark(const BenchCase& bc) {
     CUDA_CHECK(cudaMemcpy(d_C_data, C_data.data(), M * N, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_C_scales, C_scales.data(), M * num_blocks_n_c, cudaMemcpyHostToDevice));
 
-    benchmark_variant("FP8 TensorCore", 0, d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K);
-    benchmark_variant("BF16 CUDACore", 1, d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K);
-    benchmark_variant("Mixed Tiled", 2, d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K);
+    benchmark_variant("FP8 TensorCore", 0, d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K);
+    benchmark_variant("BF16 CUDACore", 1, d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K);
+    benchmark_variant("Mixed Tiled", 2, d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K);
 
     cudaFree(d_A_data);
     cudaFree(d_A_scales);
     cudaFree(d_B);
     cudaFree(d_C_data);
     cudaFree(d_C_scales);
-    cudaFree(d_D);
+    cudaFree(d_D_data);
+    cudaFree(d_D_scales);
 }
 
 int main() {

@@ -230,10 +230,20 @@ gemm_fp8_tc_kernel_v2(const uint8_t* __restrict__ A_data,
 
 void gemm_fp8_tensorcore(const uint8_t* d_A_data, const uint8_t* d_A_scales,
                           const __nv_bfloat16* d_B, const uint8_t* d_C_data,
-                          const uint8_t* d_C_scales, float* d_D,
+                          const uint8_t* d_C_scales,
+                          uint8_t* d_D_data, uint8_t* d_D_scales,
                           int M, int N, int K, cudaStream_t stream) {
+    // Compute in FP32, then quantize output to MXFP8
+    float* d_D_fp32;
+    CUDA_CHECK(cudaMalloc(&d_D_fp32, M * N * sizeof(float)));
+
     dim3 block(256);  // 8 warps
     dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
     gemm_fp8_tc_kernel_v2<<<grid, block, 0, stream>>>(d_A_data, d_A_scales, d_B,
-                                                       d_C_data, d_C_scales, d_D, M, N, K);
+                                                       d_C_data, d_C_scales, d_D_fp32, M, N, K);
+
+    // Quantize output to MXFP8 (block scaling along N dimension)
+    mxfp8_quantize_gpu(d_D_fp32, d_D_data, d_D_scales, M, N, stream);
+
+    cudaFree(d_D_fp32);
 }

@@ -65,16 +65,17 @@ struct BenchResult {
 BenchResult run_variant(int variant, const char* name,
                         uint8_t* d_A_data, uint8_t* d_A_scales,
                         __nv_bfloat16* d_B, uint8_t* d_C_data,
-                        uint8_t* d_C_scales, float* d_D,
+                        uint8_t* d_C_scales,
+                        uint8_t* d_D_data, uint8_t* d_D_scales,
                         const float* D_ref, int M, int N, int K) {
     BenchResult result;
 
     // Warmup
     for (int i = 0; i < 5; i++) {
         switch (variant) {
-            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
+            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
         }
     }
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -88,9 +89,9 @@ BenchResult run_variant(int variant, const char* name,
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < num_runs; i++) {
         switch (variant) {
-            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
-            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K); break;
+            case 0: gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 1: gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
+            case 2: gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D_data, d_D_scales, M, N, K); break;
         }
     }
     CUDA_CHECK(cudaEventRecord(stop));
@@ -104,9 +105,15 @@ BenchResult run_variant(int variant, const char* name,
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
 
-    // Accuracy: compare against bf16 reference
+    // Accuracy: dequantize MXFP8 output and compare against bf16 reference
+    float* d_D_deq;
+    CUDA_CHECK(cudaMalloc(&d_D_deq, M * N * sizeof(float)));
+    mxfp8_dequantize_gpu(d_D_data, d_D_scales, d_D_deq, M, N);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
     std::vector<float> D_result(M * N);
-    CUDA_CHECK(cudaMemcpy(D_result.data(), d_D, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(D_result.data(), d_D_deq, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+    cudaFree(d_D_deq);
 
     float max_rel = 0.0f, sum_rel = 0.0f, sum_sq = 0.0f;
     int valid_count = 0;
@@ -166,15 +173,18 @@ int main() {
 
         // Allocate device memory
         uint8_t *d_A_data, *d_A_scales, *d_C_data, *d_C_scales;
+        uint8_t *d_D_data, *d_D_scales;
         __nv_bfloat16* d_B;
-        float* d_D;
+
+        int num_blocks_n_d = (N + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
 
         CUDA_CHECK(cudaMalloc(&d_A_data, M * K));
         CUDA_CHECK(cudaMalloc(&d_A_scales, M * num_blocks_k_a));
         CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(__nv_bfloat16)));
         CUDA_CHECK(cudaMalloc(&d_C_data, M * N));
         CUDA_CHECK(cudaMalloc(&d_C_scales, M * num_blocks_n_c));
-        CUDA_CHECK(cudaMalloc(&d_D, M * N * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_D_data, M * N));
+        CUDA_CHECK(cudaMalloc(&d_D_scales, M * num_blocks_n_d));
 
         CUDA_CHECK(cudaMemcpy(d_A_data, A_data.data(), M * K, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_A_scales, A_scales.data(), M * num_blocks_k_a, cudaMemcpyHostToDevice));
@@ -192,7 +202,8 @@ int main() {
 
         for (int v = 0; v < 3; v++) {
             BenchResult r = run_variant(v, variant_names[v],
-                                        d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D,
+                                        d_A_data, d_A_scales, d_B, d_C_data, d_C_scales,
+                                        d_D_data, d_D_scales,
                                         D_ref.data(), M, N, K);
             printf("│ %-19s │ %9.3f │ %8.2f │ %9.6f │ %9.6f │ %13.6e │\n",
                    variant_names[v], r.time_ms, r.tflops, r.max_rel_err, r.avg_rel_err, r.rmse);
@@ -205,7 +216,8 @@ int main() {
         cudaFree(d_B);
         cudaFree(d_C_data);
         cudaFree(d_C_scales);
-        cudaFree(d_D);
+        cudaFree(d_D_data);
+        cudaFree(d_D_scales);
     }
 
     printf("Notes:\n");

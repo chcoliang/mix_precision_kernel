@@ -110,11 +110,17 @@ __global__ void gemm_bf16_cudacore_kernel(const uint8_t* __restrict__ A_data,
 
 void gemm_bf16_cudacore(const uint8_t* d_A_data, const uint8_t* d_A_scales,
                          const __nv_bfloat16* d_B, const uint8_t* d_C_data,
-                         const uint8_t* d_C_scales, float* d_D,
+                         const uint8_t* d_C_scales,
+                         uint8_t* d_D_data, uint8_t* d_D_scales,
                          int M, int N, int K, cudaStream_t stream) {
-    // 16x16 threads, each handling 4x4 elements = 64x64 tile
+    float* d_D_fp32;
+    CUDA_CHECK(cudaMalloc(&d_D_fp32, M * N * sizeof(float)));
+
     dim3 block(16, 16);
     dim3 grid((N + TILE_N - 1) / TILE_N, (M + TILE_M - 1) / TILE_M);
     gemm_bf16_cudacore_kernel<<<grid, block, 0, stream>>>(d_A_data, d_A_scales, d_B,
-                                                           d_C_data, d_C_scales, d_D, M, N, K);
+                                                           d_C_data, d_C_scales, d_D_fp32, M, N, K);
+
+    mxfp8_quantize_gpu(d_D_fp32, d_D_data, d_D_scales, M, N, stream);
+    cudaFree(d_D_fp32);
 }

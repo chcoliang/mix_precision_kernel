@@ -54,20 +54,28 @@ void run_correctness_test(const TestCase& tc, float tolerance) {
     mxfp8_dequantize_host(C_data.data(), C_scales.data(), C_deq.data(), M, N);
 
     // Reference: D_ref = A_deq * B_ref + C_deq
+    std::vector<float> D_ref_fp32(M * N);
+    gemm_reference_host(A_deq.data(), B_ref.data(), C_deq.data(), D_ref_fp32.data(), M, N, K);
+
+    // Quantize reference to MXFP8 then dequantize (to match output format)
+    int num_blocks_n_d = (N + MXFP8_BLOCK_SIZE - 1) / MXFP8_BLOCK_SIZE;
+    std::vector<uint8_t> D_ref_data(M * N), D_ref_scales(M * num_blocks_n_d);
+    mxfp8_quantize_host(D_ref_fp32.data(), D_ref_data.data(), D_ref_scales.data(), M, N);
     std::vector<float> D_ref(M * N);
-    gemm_reference_host(A_deq.data(), B_ref.data(), C_deq.data(), D_ref.data(), M, N, K);
+    mxfp8_dequantize_host(D_ref_data.data(), D_ref_scales.data(), D_ref.data(), M, N);
 
     // Allocate device memory
     uint8_t *d_A_data, *d_A_scales, *d_C_data, *d_C_scales;
+    uint8_t *d_D_data, *d_D_scales;
     __nv_bfloat16* d_B;
-    float* d_D;
 
     CUDA_CHECK(cudaMalloc(&d_A_data, M * K));
     CUDA_CHECK(cudaMalloc(&d_A_scales, M * num_blocks_k_a));
     CUDA_CHECK(cudaMalloc(&d_B, K * N * sizeof(__nv_bfloat16)));
     CUDA_CHECK(cudaMalloc(&d_C_data, M * N));
     CUDA_CHECK(cudaMalloc(&d_C_scales, M * num_blocks_n_c));
-    CUDA_CHECK(cudaMalloc(&d_D, M * N * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_D_data, M * N));
+    CUDA_CHECK(cudaMalloc(&d_D_scales, M * num_blocks_n_d));
 
     CUDA_CHECK(cudaMemcpy(d_A_data, A_data.data(), M * K, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_A_scales, A_scales.data(), M * num_blocks_k_a, cudaMemcpyHostToDevice));
@@ -80,22 +88,33 @@ void run_correctness_test(const TestCase& tc, float tolerance) {
     // Test each variant
     const char* variant_names[] = {"FP8 TensorCore", "BF16 CUDACore", "Mixed Tiled"};
     auto run_variant = [&](int variant) {
-        CUDA_CHECK(cudaMemset(d_D, 0, M * N * sizeof(float)));
+        CUDA_CHECK(cudaMemset(d_D_data, 0, M * N));
+        CUDA_CHECK(cudaMemset(d_D_scales, 0, M * num_blocks_n_d));
 
         switch (variant) {
             case 0:
-                gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K);
+                gemm_fp8_tensorcore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales,
+                                    d_D_data, d_D_scales, M, N, K);
                 break;
             case 1:
-                gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K);
+                gemm_bf16_cudacore(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales,
+                                   d_D_data, d_D_scales, M, N, K);
                 break;
             case 2:
-                gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales, d_D, M, N, K);
+                gemm_mixed_tiled(d_A_data, d_A_scales, d_B, d_C_data, d_C_scales,
+                                 d_D_data, d_D_scales, M, N, K);
                 break;
         }
 
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(D_result.data(), d_D, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+
+        // Dequantize output MXFP8 to float for comparison
+        float* d_D_deq;
+        CUDA_CHECK(cudaMalloc(&d_D_deq, M * N * sizeof(float)));
+        mxfp8_dequantize_gpu(d_D_data, d_D_scales, d_D_deq, M, N);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(D_result.data(), d_D_deq, M * N * sizeof(float), cudaMemcpyDeviceToHost));
+        cudaFree(d_D_deq);
 
         float max_rel_err = compute_relative_error(D_result.data(), D_ref.data(), M * N);
         bool pass = max_rel_err < tolerance;
@@ -112,12 +131,13 @@ void run_correctness_test(const TestCase& tc, float tolerance) {
     cudaFree(d_B);
     cudaFree(d_C_data);
     cudaFree(d_C_scales);
-    cudaFree(d_D);
+    cudaFree(d_D_data);
+    cudaFree(d_D_scales);
 }
 
 int main() {
     printf("=== GEMM Correctness Tests ===\n");
-    printf("Tolerance: 0.1 (10%% relative error allowed due to FP8 quantization)\n");
+    printf("Tolerance: 0.15 (15%% max relative error, accounts for fp16 intermediate + MXFP8 output)\n");
 
     TestCase tests[] = {
         {128, 128, 128, "Small"},
@@ -127,7 +147,7 @@ int main() {
         {1024, 1024, 1024, "1K cube"},
     };
 
-    float tolerance = 0.1f;
+    float tolerance = 0.15f;
 
     for (const auto& tc : tests) {
         run_correctness_test(tc, tolerance);

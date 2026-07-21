@@ -140,26 +140,17 @@ int main() {
     printf("║  Reference: FP32 GEMM -> quantize to MXFP8 -> dequantize (gold standard)          ║\n");
     printf("╚══════════════════════════════════════════════════════════════════════════════════════╝\n\n");
 
-    // Real-world LLM shapes: (M, N, K)
+    // Large M, small N/K shapes (long sequence / large batch with small hidden)
     struct Shape { int M; int N; int K; const char* name; };
     Shape shapes[] = {
-        // LLaMA-7B typical shapes (hidden=4096, ffn=11008)
-        {4096, 12288, 4096, "LLaMA-7B QKV (seq=4K)"},
-        {4096, 4096, 4096, "LLaMA-7B O-proj (seq=4K)"},
-        {4096, 11008, 4096, "LLaMA-7B FFN-up (seq=4K)"},
-        {4096, 4096, 11008, "LLaMA-7B FFN-down (seq=4K)"},
-        // LLaMA-70B typical shapes (hidden=8192, ffn=28672)
-        {2048, 8192, 8192, "LLaMA-70B QKV (seq=2K)"},
-        {2048, 28672, 8192, "LLaMA-70B FFN-up (seq=2K)"},
-        {2048, 8192, 28672, "LLaMA-70B FFN-down (seq=2K)"},
-        // Large batch inference
-        {32768, 4096, 4096, "Batch infer (bs=32K,h=4K)"},
-        {32768, 11008, 4096, "Batch FFN-up (bs=32K)"},
-        {32768, 4096, 11008, "Batch FFN-down (bs=32K)"},
-        // Square reference points
-        {8192, 8192, 8192, "Square 8K"},
-        {16384, 16384, 16384, "Square 16K"},
-        {32768, 32768, 32768, "Square 32K"},
+        {65536, 1024, 1024, "M=64K, N=1K, K=1K"},
+        {65536, 2048, 1024, "M=64K, N=2K, K=1K"},
+        {65536, 1024, 2048, "M=64K, N=1K, K=2K"},
+        {65536, 2048, 2048, "M=64K, N=2K, K=2K"},
+        {131072, 1024, 1024, "M=128K, N=1K, K=1K"},
+        {131072, 2048, 1024, "M=128K, N=2K, K=1K"},
+        {131072, 1024, 2048, "M=128K, N=1K, K=2K"},
+        {131072, 2048, 2048, "M=128K, N=2K, K=2K"},
     };
     const char* variant_names[] = {"FP8 TensorCore (WMMA)", "BF16 CUDA Core", "Mixed Tiled (WMMA)"};
 
